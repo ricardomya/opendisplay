@@ -128,6 +128,11 @@ final class StreamReceiver: ObservableObject {
     private var cursorLostThisWindow = 0
     private var cursorPort: UInt16 { port &+ 1 }
     private let queue = DispatchQueue(label: "receiver.video")
+    // Local camera extension: the sender asks with `cameraConfig`, this
+    // streams `ODCM` frames back on the same session.
+    private let camera = CameraSource()
+    /// User-facing switch, checked when the sender asks for the camera.
+    private var allowCamera = true
     private var buffer = Data()
     private var formatDesc: CMVideoFormatDescription?
     #if DEBUG
@@ -369,6 +374,25 @@ final class StreamReceiver: ObservableObject {
         self.maxEncodeWide = maxEncodeWide
         self.maxEncodeHigh = maxEncodeHigh
         displayLayer.videoGravity = .resizeAspect
+        camera.onFrame = { [weak self] data, _ in
+            guard let self else { return }
+            self.queue.async { self.sendCameraFrameOnQueue(data) }
+        }
+        camera.onState = { [weak self] enabled, reason in
+            guard let self else { return }
+            self.queue.async { self.sendCameraState(enabled: enabled, reason: reason) }
+        }
+    }
+
+    /// Enable/disable the camera for this device while connected.
+    func setAllowCamera(_ allowed: Bool) {
+        queue.async {
+            self.allowCamera = allowed
+            if !allowed {
+                self.camera.stop()
+                self.sendCameraState(enabled: false, reason: "disabled on device")
+            }
+        }
     }
 
     func start(port: UInt16 = 9000) {
@@ -419,6 +443,11 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             guard paused != self.renderingPaused else { return }
             self.renderingPaused = paused
+            if paused {
+                // iOS interrupts capture in the background anyway; stop it
+                // deliberately so the sender's cameraState reflects reality.
+                self.camera.stop()
+            }
             Log.info(paused ? "rendering paused (backgrounded)" : "rendering resumed")
             if !paused {
                 self.displayLayer.flush()
@@ -463,6 +492,7 @@ final class StreamReceiver: ObservableObject {
                 self.listenerHealthy = false
                 self.stopCursorListener()
                 self.audioPlayer.stop()
+                self.camera.stop()
                 self.setConnected(false)
                 self.setStatus(status)
                 completion?()
@@ -881,6 +911,27 @@ final class StreamReceiver: ObservableObject {
             let height = obj["height"] as? Int ?? 0
             let fps = obj["framesPerSecond"] as? Int ?? 0
             Log.info("stream configuration: \(codec.uppercased()) \(width)x\(height) @\(fps)fps")
+        case "cameraConfig":
+            let enable = obj["enable"] as? Bool ?? false
+            guard enable else {
+                camera.stop()
+                sendCameraState(enabled: false, reason: "disabled by sender")
+                return
+            }
+            guard allowCamera else {
+                sendCameraState(enabled: false, reason: "disabled on device")
+                return
+            }
+            var config = CameraSource.Config()
+            config.width = Int32(obj["width"] as? Int ?? 1280)
+            config.height = Int32(obj["height"] as? Int ?? 720)
+            config.fps = Int32(obj["fps"] as? Int ?? 30)
+            config.bitrate = obj["bitrate"] as? Int ?? 2_500_000
+            config.position = (obj["camera"] as? String) == "back" ? .back : .front
+            config.mirror = obj["mirror"] as? Bool ?? false
+            camera.start(config)
+        case "cameraKf":
+            camera.requestKeyframe()
         case WireMessage.power:
             let action = (obj["action"] as? String).flatMap(PowerAction.init(rawValue:))
             guard let action, powerActions.contains(action),
@@ -960,6 +1011,8 @@ final class StreamReceiver: ObservableObject {
         ]
         // Local pv 4 audio extension: this build can play `ODAU` PCM frames.
         hello["audio"] = true
+        // Local camera extension: this build can stream `ODCM` H.264 frames.
+        hello["camera"] = true
         let panel = panelOverride ?? PanelAnnouncement(
             pixelsWide: devicePixelsWide, pixelsHigh: devicePixelsHigh, scale: deviceScale)
         hello["panel"] = panel.json
@@ -1112,6 +1165,29 @@ final class StreamReceiver: ObservableObject {
             if let error { Log.info("control send error: \(error)") }
             completion?()
         })
+    }
+
+    /// One encoded camera access unit (already carrying its 32-byte ODCM
+    /// header). The receiver-to-sender direction caps a payload at 2^20-1, so
+    /// an oversize frame is dropped rather than tearing the session down.
+    private func sendCameraFrameOnQueue(_ payload: Data) {
+        guard let connection, connection.state == .ready else { return }
+        guard !payload.isEmpty, payload.count <= 1_048_575 else {
+            Log.info("camera: dropping oversize frame (\(payload.count) bytes)")
+            return
+        }
+        var header = UInt32(payload.count).bigEndian
+        var frame = Data(bytes: &header, count: 4)
+        frame.append(payload)
+        connection.send(content: frame, completion: .contentProcessed { error in
+            if let error { Log.info("camera send error: \(error)") }
+        })
+    }
+
+    private func sendCameraState(enabled: Bool, reason: String) {
+        var message: [String: Any] = ["type": "cameraState", "enabled": enabled]
+        if !reason.isEmpty { message["reason"] = reason }
+        sendControl(message)
     }
 
     /// Optional hardware input is silent when paired with a legacy sender.

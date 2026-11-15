@@ -415,6 +415,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
+    @AppStorage("cameraEnabled") private var cameraEnabled = true
     // Set once the user tapped "Rate on the App Store": the row is an
     // invitation, not a permanent fixture.
     @AppStorage("rateAppTapped") private var rateAppTapped = false
@@ -449,6 +450,19 @@ struct SettingsView: View {
                         LabeledRow("Stream",
                                    value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
                     }
+                }
+
+                Section {
+                    Toggle(isOn: $cameraEnabled) {
+                        Label("Use this \(deviceKind)'s camera as a webcam", systemImage: "video")
+                    }
+                    .onChange(of: cameraEnabled) { value in
+                        receiver.setAllowCamera(value)
+                    }
+                } header: {
+                    Text("Camera")
+                } footer: {
+                    Text("While this app is open, the connected computer can pick this \(deviceKind) as a camera in its meeting apps. Capture stops when the app goes to the background.")
                 }
 
                 Section {
@@ -685,6 +699,7 @@ final class ReceiverModel: ObservableObject {
         receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
                                   deviceKind: deviceKind,
                                   fallbackServiceName: UIDevice.current.name)
+        receiver.setAllowCamera(UserDefaults.standard.object(forKey: "cameraEnabled") as? Bool ?? true)
         // Seed with the whole screen in landscape; the view replaces it with
         // its window size on first layout, before any Mac connects.
         let native = UIScreen.main.nativeBounds.size   // portrait pixels
