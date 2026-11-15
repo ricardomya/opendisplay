@@ -416,6 +416,7 @@ struct SettingsView: View {
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
     @AppStorage("cameraEnabled") private var cameraEnabled = true
+    @AppStorage("micEnabled") private var micEnabled = true
     // Set once the user tapped "Rate on the App Store": the row is an
     // invitation, not a permanent fixture.
     @AppStorage("rateAppTapped") private var rateAppTapped = false
@@ -459,10 +460,16 @@ struct SettingsView: View {
                     .onChange(of: cameraEnabled) { value in
                         receiver.setAllowCamera(value)
                     }
+                    Toggle(isOn: $micEnabled) {
+                        Label("Use this \(deviceKind)'s microphone", systemImage: "mic")
+                    }
+                    .onChange(of: micEnabled) { value in
+                        receiver.setAllowMic(value)
+                    }
                 } header: {
-                    Text("Camera")
+                    Text("Camera & microphone")
                 } footer: {
-                    Text("While this app is open, the connected computer can pick this \(deviceKind) as a camera in its meeting apps. Capture stops when the app goes to the background.")
+                    Text("While this app is open, the connected computer can pick this \(deviceKind) as a camera or microphone in its meeting apps. Capture stops when the app goes to the background.")
                 }
 
                 Section {
@@ -700,6 +707,7 @@ final class ReceiverModel: ObservableObject {
                                   deviceKind: deviceKind,
                                   fallbackServiceName: UIDevice.current.name)
         receiver.setAllowCamera(UserDefaults.standard.object(forKey: "cameraEnabled") as? Bool ?? true)
+        receiver.setAllowMic(UserDefaults.standard.object(forKey: "micEnabled") as? Bool ?? true)
         // Seed with the whole screen in landscape; the view replaces it with
         // its window size on first layout, before any Mac connects.
         let native = UIScreen.main.nativeBounds.size   // portrait pixels

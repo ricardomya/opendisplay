@@ -69,7 +69,8 @@ final class AudioPlayer {
             started = true
             #if os(iOS)
             let session = AVAudioSession.sharedInstance()
-            try? session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try? session.setCategory(.playAndRecord, mode: .default,
+                                     options: [.mixWithOthers, .defaultToSpeaker])
             try? session.setActive(true)
             #endif
         }

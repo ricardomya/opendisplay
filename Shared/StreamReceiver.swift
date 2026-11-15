@@ -133,6 +133,10 @@ final class StreamReceiver: ObservableObject {
     private let camera = CameraSource()
     /// User-facing switch, checked when the sender asks for the camera.
     private var allowCamera = true
+    // Local microphone extension: 48 kHz mono PCM as `ODMI` frames.
+    private let mic = MicSource()
+    /// User-facing switch for the microphone bridge.
+    private var allowMic = true
     private var buffer = Data()
     private var formatDesc: CMVideoFormatDescription?
     #if DEBUG
@@ -382,6 +386,13 @@ final class StreamReceiver: ObservableObject {
             guard let self else { return }
             self.queue.async { self.sendCameraState(enabled: enabled, reason: reason) }
         }
+        mic.onPcm = { [weak self] pcm in
+            guard let self else { return }
+            self.queue.async { self.sendMicFrameOnQueue(pcm) }
+        }
+        mic.onState = { _, reason in
+            if !reason.isEmpty { Log.info("mic: unavailable (\(reason))") }
+        }
     }
 
     /// Enable/disable the camera for this device while connected.
@@ -391,6 +402,18 @@ final class StreamReceiver: ObservableObject {
             if !allowed {
                 self.camera.stop()
                 self.sendCameraState(enabled: false, reason: "disabled on device")
+            }
+        }
+    }
+
+    /// Enable/disable the microphone bridge for this device.
+    func setAllowMic(_ allowed: Bool) {
+        queue.async {
+            self.allowMic = allowed
+            if allowed {
+                if self.connection?.state == .ready { self.mic.start() }
+            } else {
+                self.mic.stop()
             }
         }
     }
@@ -447,6 +470,9 @@ final class StreamReceiver: ObservableObject {
                 // iOS interrupts capture in the background anyway; stop it
                 // deliberately so the sender's cameraState reflects reality.
                 self.camera.stop()
+                self.mic.stop()
+            } else if self.allowMic, self.connection?.state == .ready {
+                self.mic.start()
             }
             Log.info(paused ? "rendering paused (backgrounded)" : "rendering resumed")
             if !paused {
@@ -493,6 +519,7 @@ final class StreamReceiver: ObservableObject {
                 self.stopCursorListener()
                 self.audioPlayer.stop()
                 self.camera.stop()
+                self.mic.stop()
                 self.setConnected(false)
                 self.setStatus(status)
                 completion?()
@@ -932,6 +959,14 @@ final class StreamReceiver: ObservableObject {
             camera.start(config)
         case "cameraKf":
             camera.requestKeyframe()
+        case "micConfig":
+            let enable = obj["enable"] as? Bool ?? false
+            guard enable else {
+                mic.stop()
+                return
+            }
+            guard allowMic else { return }
+            mic.start()
         case WireMessage.power:
             let action = (obj["action"] as? String).flatMap(PowerAction.init(rawValue:))
             guard let action, powerActions.contains(action),
@@ -1013,6 +1048,8 @@ final class StreamReceiver: ObservableObject {
         hello["audio"] = true
         // Local camera extension: this build can stream `ODCM` H.264 frames.
         hello["camera"] = true
+        // Local microphone extension: this build can stream `ODMI` PCM.
+        hello["mic"] = true
         let panel = panelOverride ?? PanelAnnouncement(
             pixelsWide: devicePixelsWide, pixelsHigh: devicePixelsHigh, scale: deviceScale)
         hello["panel"] = panel.json
@@ -1188,6 +1225,23 @@ final class StreamReceiver: ObservableObject {
         var message: [String: Any] = ["type": "cameraState", "enabled": enabled]
         if !reason.isEmpty { message["reason"] = reason }
         sendControl(message)
+    }
+
+    /// One block of microphone audio: 8-byte `ODMI` header + 48 kHz mono s16.
+    private func sendMicFrameOnQueue(_ pcm: Data) {
+        guard let connection, connection.state == .ready else { return }
+        guard !pcm.isEmpty, pcm.count + 8 <= 1_048_575 else { return }
+        var payload = Data(capacity: 8 + pcm.count)
+        payload.append(contentsOf: [0x4F, 0x44, 0x4D, 0x49]) // ODMI
+        payload.append(1)                                    // version
+        payload.append(contentsOf: [0, 0, 0])
+        payload.append(pcm)
+        var header = UInt32(payload.count).bigEndian
+        var frame = Data(bytes: &header, count: 4)
+        frame.append(payload)
+        connection.send(content: frame, completion: .contentProcessed { error in
+            if let error { Log.info("mic send error: \(error)") }
+        })
     }
 
     /// Optional hardware input is silent when paired with a legacy sender.
