@@ -219,6 +219,7 @@ final class StreamReceiver: ObservableObject {
     }
 
     let displayLayer: AVSampleBufferDisplayLayer
+    private let audioPlayer = AudioPlayer()
 
     /// Panel size in pixels + scale, announced to the Mac in a "hello"
     /// message so it can size the virtual display. Follows the window: a
@@ -460,6 +461,7 @@ final class StreamReceiver: ObservableObject {
                 self.listener = nil
                 self.listenerHealthy = false
                 self.stopCursorListener()
+                self.audioPlayer.stop()
                 self.setConnected(false)
                 self.setStatus(status)
                 completion?()
@@ -955,6 +957,8 @@ final class StreamReceiver: ObservableObject {
             "pv": WireProtocol.version,   // issue #132 — absent on old receivers
             "displayMaxFrameRate": displayMaxFrameRate,
         ]
+        // Local pv 4 audio extension: this build can play `ODAU` PCM frames.
+        hello["audio"] = true
         let panel = panelOverride ?? PanelAnnouncement(
             pixelsWide: devicePixelsWide, pixelsHigh: devicePixelsHigh, scale: deviceScale)
         hello["panel"] = panel.json
@@ -1197,6 +1201,11 @@ final class StreamReceiver: ObservableObject {
     // MARK: - Annex B -> CMSampleBuffer
 
     private func handleAnnexB(_ data: Data) {
+        // Local pv 4 audio extension: header then 48 kHz stereo s16 PCM.
+        if data.count > 8, data.prefix(4) == Data("ODAU".utf8) {
+            audioPlayer.play(pcm: Data(data.dropFirst(8)))
+            return
+        }
         // Pure JSON payload = control message (pong, cursor sprite etc.).
         // Video frames also begin with '{' (telemetry prefix) but always
         // contain start codes — the null bytes make them unambiguous even
