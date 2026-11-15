@@ -185,7 +185,6 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private func makeEncoder() -> VTCompressionSession? {
         let specification: [CFString: Any] = [
             kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true,
-            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
         ]
         let attributes: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
@@ -269,7 +268,7 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
                                         presentationTimeStamp: pts,
                                         duration: .invalid,
                                         frameProperties: properties,
-                                        sourceFrameRefCon: nil,
+                                        sourceFrameRefcon: nil,
                                         infoFlagsOut: nil)
     }
 
