@@ -6,7 +6,7 @@ import VideoToolbox
 /// rate control and emits `ODCM` payloads (32-byte header + Annex B access
 /// unit) for the Windows sender's virtual camera.
 ///
-/// Local extension, mirroring AudioPlayer's role: the sender asks with
+/// Local extension, mirroring AudioHub's playback role: the sender asks with
 /// `cameraConfig`, this streams `ODCM` frames back on the same TCP session,
 /// and `cameraState` reports why nothing arrives when it cannot.
 final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -162,7 +162,7 @@ final class CameraSource: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             return false
         }
 
-        // AudioPlayer owns the app's audio session; capture must not rewrite it.
+        // AudioHub owns the app's audio session; capture must not rewrite it.
         session.automaticallyConfiguresApplicationAudioSession = false
 
         if let connection = output.connection(with: .video) {

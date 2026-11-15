@@ -134,9 +134,10 @@ final class StreamReceiver: ObservableObject {
     /// User-facing switch, checked when the sender asks for the camera.
     private var allowCamera = true
     // Local microphone extension: 48 kHz mono PCM as `ODMI` frames.
-    private let mic = MicSource()
     /// User-facing switch for the microphone bridge.
     private var allowMic = true
+    /// What the sender last asked for; replayed after a reconnect.
+    private var micRequested = false
     private var buffer = Data()
     private var formatDesc: CMVideoFormatDescription?
     #if DEBUG
@@ -228,7 +229,9 @@ final class StreamReceiver: ObservableObject {
     }
 
     let displayLayer: AVSampleBufferDisplayLayer
-    private let audioPlayer = AudioPlayer()
+    /// Playback and microphone share one voice-processing engine so the
+    /// speaker is the echo canceller's reference.
+    private let audio = AudioHub()
     private var audioFramesReceived = 0
 
     /// Panel size in pixels + scale, announced to the Mac in a "hello"
@@ -386,11 +389,11 @@ final class StreamReceiver: ObservableObject {
             guard let self else { return }
             self.queue.async { self.sendCameraState(enabled: enabled, reason: reason) }
         }
-        mic.onPcm = { [weak self] pcm in
+        audio.onMicPcm = { [weak self] pcm in
             guard let self else { return }
             self.queue.async { self.sendMicFrameOnQueue(pcm) }
         }
-        mic.onState = { _, reason in
+        audio.onMicState = { _, reason in
             if !reason.isEmpty { Log.info("mic: unavailable (\(reason))") }
         }
     }
@@ -411,9 +414,11 @@ final class StreamReceiver: ObservableObject {
         queue.async {
             self.allowMic = allowed
             if allowed {
-                if self.connection?.state == .ready { self.mic.start() }
+                if self.connection?.state == .ready, self.micRequested {
+                    self.audio.setMicEnabled(true)
+                }
             } else {
-                self.mic.stop()
+                self.audio.setMicEnabled(false)
             }
         }
     }
@@ -470,9 +475,9 @@ final class StreamReceiver: ObservableObject {
                 // iOS interrupts capture in the background anyway; stop it
                 // deliberately so the sender's cameraState reflects reality.
                 self.camera.stop()
-                self.mic.stop()
-            } else if self.allowMic, self.connection?.state == .ready {
-                self.mic.start()
+                self.audio.setPaused(true)
+            } else {
+                self.audio.setPaused(false)
             }
             Log.info(paused ? "rendering paused (backgrounded)" : "rendering resumed")
             if !paused {
@@ -517,9 +522,8 @@ final class StreamReceiver: ObservableObject {
                 self.listener = nil
                 self.listenerHealthy = false
                 self.stopCursorListener()
-                self.audioPlayer.stop()
+                self.audio.stopAll()
                 self.camera.stop()
-                self.mic.stop()
                 self.setConnected(false)
                 self.setStatus(status)
                 completion?()
@@ -961,12 +965,13 @@ final class StreamReceiver: ObservableObject {
             camera.requestKeyframe()
         case "micConfig":
             let enable = obj["enable"] as? Bool ?? false
+            micRequested = enable
             guard enable else {
-                mic.stop()
+                audio.setMicEnabled(false)
                 return
             }
             guard allowMic else { return }
-            mic.start()
+            audio.setMicEnabled(true)
         case WireMessage.power:
             let action = (obj["action"] as? String).flatMap(PowerAction.init(rawValue:))
             guard let action, powerActions.contains(action),
@@ -1338,7 +1343,7 @@ final class StreamReceiver: ObservableObject {
             if audioFramesReceived == 1 || audioFramesReceived % 250 == 0 {
                 Log.info("audio: \(audioFramesReceived) frame(s) rx, \(data.count) bytes")
             }
-            audioPlayer.play(pcm: Data(data.dropFirst(8)))
+            audio.play(pcm: Data(data.dropFirst(8)))
             return
         }
         // Pure JSON payload = control message (pong, cursor sprite etc.).
