@@ -75,7 +75,10 @@ final class AudioPlayer {
         }
         if !engine.isRunning {
             guard startFailures < 3 else { return }
-            do { try engine.start() } catch {
+            do {
+                try engine.start()
+                Log.info("audio: engine running, 48000 Hz stereo")
+            } catch {
                 startFailures += 1
                 Log.info("audio: engine start failed (\(startFailures)/3): \(error)")
                 return

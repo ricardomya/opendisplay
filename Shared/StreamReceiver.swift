@@ -220,6 +220,7 @@ final class StreamReceiver: ObservableObject {
 
     let displayLayer: AVSampleBufferDisplayLayer
     private let audioPlayer = AudioPlayer()
+    private var audioFramesReceived = 0
 
     /// Panel size in pixels + scale, announced to the Mac in a "hello"
     /// message so it can size the virtual display. Follows the window: a
@@ -1203,6 +1204,10 @@ final class StreamReceiver: ObservableObject {
     private func handleAnnexB(_ data: Data) {
         // Local pv 4 audio extension: header then 48 kHz stereo s16 PCM.
         if data.count > 8, data.prefix(4) == Data("ODAU".utf8) {
+            audioFramesReceived += 1
+            if audioFramesReceived == 1 || audioFramesReceived % 250 == 0 {
+                Log.info("audio: \(audioFramesReceived) frame(s) rx, \(data.count) bytes")
+            }
             audioPlayer.play(pcm: Data(data.dropFirst(8)))
             return
         }
