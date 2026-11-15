@@ -39,6 +39,15 @@ jobs:
             MARKETING_VERSION=1.30.3 CURRENT_PROJECT_VERSION=1 \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
 
+      - name: Ad-hoc sign (sideloaders need an existing signature to replace)
+        run: |
+          set -euo pipefail
+          APP="$(find build-ios/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)"
+          test -n "$APP"
+          codesign --force --sign - --timestamp=none "$APP"
+          codesign -dvv "$APP" || true
+          codesign --verify --verbose=2 "$APP" || true
+
       - name: Package Payload IPA
         run: |
           set -euo pipefail
