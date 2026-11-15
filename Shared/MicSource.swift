@@ -55,9 +55,13 @@ final class MicSource {
         guard !running else { return }
         do {
             let session = AVAudioSession.sharedInstance()
+            // .voiceChat is what enables the system's echo cancellation: this
+            // device plays the computer's sound through its speaker, and the
+            // microphone must not send that sound back (the meeting's own AEC
+            // cannot see across our virtual-device + network path).
             try session.setCategory(.playAndRecord,
-                                    mode: .default,
-                                    options: [.mixWithOthers, .defaultToSpeaker])
+                                    mode: .voiceChat,
+                                    options: [.defaultToSpeaker])
             try session.setActive(true)
         } catch {
             Log.info("mic: audio session: \(error)")
@@ -66,6 +70,12 @@ final class MicSource {
         }
 
         let input = engine.inputNode
+        do {
+            try input.setVoiceProcessingEnabled(true)
+            Log.info("mic: voice processing (echo cancellation) enabled")
+        } catch {
+            Log.info("mic: voice processing unavailable: \(error)")
+        }
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             onState?(false, "unavailable")
