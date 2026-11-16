@@ -20,7 +20,9 @@ final class AudioHub {
     var onMicState: ((Bool, String) -> Void)?
 
     private let queue = DispatchQueue(label: "com.opendisplay.audio", qos: .userInteractive)
-    private let engine = AVAudioEngine()
+    // Rebuilt on every mode switch: an engine that has run voice processing
+    // cannot reliably start again in .playback (kAUStartIO, 2003329396).
+    private var engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let playFormat = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                            sampleRate: 48_000,
@@ -39,6 +41,7 @@ final class AudioHub {
     private var paused = false
     private var pendingFrames = 0
     private var startFailures = 0
+    private var lastStartAttempt: TimeInterval = 0
     private var lastConfigured: TimeInterval = 0
     private var observers: [NSObjectProtocol] = []
 
@@ -48,9 +51,10 @@ final class AudioHub {
         #if os(iOS)
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange,
-                                           object: engine,
-                                           queue: nil) { [weak self] _ in
-            self?.queue.async { self?.handleConfigurationChange() }
+                                           object: nil,
+                                           queue: nil) { [weak self] note in
+            guard let self, (note.object as? AVAudioEngine) === self.engine else { return }
+            self.queue.async { self?.handleConfigurationChange() }
         })
         observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification,
                                            object: nil,
@@ -110,13 +114,20 @@ final class AudioHub {
             if !player.isPlaying { player.play() }
             return true
         }
+        let now = Date().timeIntervalSince1970
+        if startFailures >= 3 && now - lastStartAttempt < 1 {
+            return false
+        }
+        lastStartAttempt = now
         do {
             try applyMode(voice: micRunning)
             startFailures = 0
             return true
         } catch {
             startFailures += 1
-            Log.info("audio: engine start failed (\(startFailures)/3): \(error)")
+            if startFailures <= 3 {
+                Log.info("audio: engine start failed (\(startFailures)): \(error)")
+            }
             return false
         }
     }
@@ -254,23 +265,38 @@ final class AudioHub {
 
     /// Stop the engine, switch the session's mode, install or remove the mic
     /// tap, then start again. Everything happens on the audio queue.
+    /// Rebuild the engine for the requested direction. A fresh AVAudioEngine
+    /// is the only reliable reset: an engine that has run voice processing
+    /// keeps a stale voice I/O unit, and starting it again in `.playback`
+    /// fails with CoreAudio's kAUStartIO (2003329396).
     private func applyMode(voice: Bool) throws {
-        let wasVoice = voiceActive
+        let old = engine
         // Our own category switches also announce a configuration change;
         // record the time before touching anything so the observer ignores it.
         lastConfigured = Date().timeIntervalSince1970
-        engine.stop()
+        old.stop()
         player.stop()
         pendingFrames = 0
+        if voiceActive {
+            old.inputNode.removeTap(onBus: 0)
+            try? old.inputNode.setVoiceProcessingEnabled(false)
+        }
+        old.detach(player)
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
+        // Release the voice-processing I/O unit before switching categories.
+        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        try session.setCategory(voice ? .playAndRecord : .playback,
+                                mode: voice ? .voiceChat : .default,
+                                options: voice ? [.defaultToSpeaker] : [.mixWithOthers])
+        try session.setActive(true)
+        #endif
+        let fresh = AVAudioEngine()
+        fresh.attach(player)
+        fresh.connect(player, to: fresh.mainMixerNode, format: playFormat)
+        #if os(iOS)
         if voice {
-            try session.setCategory(.playAndRecord,
-                                    mode: .voiceChat,
-                                    options: [.defaultToSpeaker])
-            try session.setActive(true)
-            let input = engine.inputNode
-            input.removeTap(onBus: 0)
+            let input = fresh.inputNode
             try input.setVoiceProcessingEnabled(true)
             let inputFormat = input.outputFormat(forBus: 0)
             guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
@@ -282,40 +308,15 @@ final class AudioHub {
                 self?.handleMic(buffer)
             }
             Log.info("audio: voice processing (echo cancellation) on")
-        } else {
-            if wasVoice {
-                let input = engine.inputNode
-                input.removeTap(onBus: 0)
-                try? input.setVoiceProcessingEnabled(false)
-                // The voice-processing I/O unit tears down asynchronously.
-                // Switching straight to .playback can make kAUStartIO fail
-                // with CoreAudio's "what" (2003329396), so give it a moment
-                // and reset the session before starting again.
-                try? session.setActive(false, options: .notifyOthersOnDeactivation)
-                Thread.sleep(forTimeInterval: 0.15)
-            }
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
         }
         #endif
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            guard wasVoice && !voice else { throw error }
-            Log.info("audio: playback start failed (\(error)); resetting the session")
-            #if os(iOS)
-            try? AVAudioSession.sharedInstance().setActive(false,
-                                                          options: .notifyOthersOnDeactivation)
-            Thread.sleep(forTimeInterval: 0.2)
-            try AVAudioSession.sharedInstance().setActive(true)
-            #endif
-            try engine.start()
-        }
+        engine = fresh
+        fresh.prepare()
+        try fresh.start()
         voiceActive = voice
         player.play()
         #if os(iOS)
-        Log.info("audio: engine running (\(voice ? "voice" : "playback"), output volume \(AVAudioSession.sharedInstance().outputVolume))")
+        Log.info("audio: engine running (\(voice ? "voice" : "playback"), output volume \(session.outputVolume))")
         #else
         Log.info("audio: engine running (\(voice ? "voice" : "playback"))")
         #endif
