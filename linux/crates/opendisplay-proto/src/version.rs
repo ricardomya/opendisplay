@@ -1,7 +1,14 @@
 //! Protocol versioning (§10).
 
 /// The protocol version this crate implements.
-pub const PV: u32 = 3;
+///
+/// 4 is a local extension: the optional hardware keyboard/pointer messages of
+/// upstream PR #316. A receiver that only knows pv 3 ignores them, and this
+/// sender still speaks every pv-3 message unchanged.
+pub const PV: u32 = 4;
+
+/// First pv that may carry `key` / `pointer` / `pointerScroll` / `inputReset`.
+pub const HARDWARE_INPUT_PV: u32 = 4;
 /// The oldest peer version this implementation still talks to (`welcome.min`).
 pub const MIN_PEER_PV: u32 = 1;
 /// A peer that advertises no `pv` anywhere is protocol 1 (§10).

@@ -152,14 +152,14 @@ fn handshake_hello_welcome_keyframe() {
     };
     assert_eq!(
         (hh.pixels_wide, hh.pixels_high, hh.pv),
-        (2560, 1600, Some(3))
+        (2560, 1600, Some(4))
     );
     assert!(s1.contains(&SenderAction::RequestKeyframe));
     assert!(h.tx.needs_idr() && h.tx.ready_for_video());
-    assert_eq!(h.tx.receiver_pv(), 3);
-    // Receiver sees welcome pv 3 / min 1.
-    assert!(matches!(&r2[..], [ReceiverAction::Welcome(w)] if w.pv == 3 && w.min == 1));
-    assert_eq!(h.rx.sender_pv(), 3);
+    assert_eq!(h.tx.receiver_pv(), 4);
+    // Receiver sees welcome pv 4 / min 1.
+    assert!(matches!(&r2[..], [ReceiverAction::Welcome(w)] if w.pv == 4 && w.min == 1));
+    assert_eq!(h.rx.sender_pv(), 4);
 }
 
 #[test]

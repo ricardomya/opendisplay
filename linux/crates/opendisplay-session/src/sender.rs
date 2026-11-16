@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use opendisplay_proto::control::{
-    ControlMessage, Cursor, CursorImg, Hello, Pencil, Ping, Pong, Proximity, Scroll, StreamConfig,
-    Touch, UpdateRequired, Welcome,
+    CameraState, ControlMessage, Cursor, CursorImg, Hello, Key, Pencil, Ping, Pointer,
+    PointerScroll, Pong, Proximity, Scroll, StreamConfig, Touch, Touches, UpdateRequired, Welcome,
 };
 use opendisplay_proto::video::{Telemetry, encode_video_frame};
 use opendisplay_proto::{Deframer, encode_frame, version};
@@ -61,10 +61,31 @@ pub enum SenderAction {
     /// The next encoded frame must be an IDR carrying SPS/PPS (§5.3).
     RequestKeyframe,
     Touch(Touch),
+    /// Local extension: full multi-touch snapshot (tablet touch mode).
+    Touches(Touches),
     Scroll(Scroll),
     Pencil(Pencil),
     Proximity(Proximity),
+    /// Optional pv 4 hardware input.
+    Key(Key),
+    Pointer(Pointer),
+    PointerScroll(PointerScroll),
+    /// Release this session's owned keys and pointer button.
+    InputReset,
     Stats(serde_json::Value),
+    /// Local extension: one complete camera access unit (Annex B H.264) from
+    /// the receiver's `ODCM` frame.
+    CameraFrame {
+        keyframe: bool,
+        sequence: u32,
+        timestamp_ms: u64,
+        data: Vec<u8>,
+    },
+    /// Local extension: the receiver's camera state (enabled/denied/size).
+    CameraState(CameraState),
+    /// Local extension: one block of the receiver microphone, 48 kHz mono
+    /// s16 (`ODMI`).
+    MicFrame(Vec<i16>),
     /// Receiver locked; it will come back (§6.1).
     ReceiverSleeping,
     /// Receiver quit for good (§6.1).
@@ -264,7 +285,18 @@ impl SenderSession {
         self.deframer.push(bytes);
         loop {
             match self.deframer.next_frame() {
-                Ok(Some(payload)) => self.on_control(now, &payload, out),
+                Ok(Some(payload)) => {
+                    // Local camera extension: binary ODCM frames run on the
+                    // receiver->sender direction beside the JSON controls
+                    // (PROTOCOL.md says that direction is JSON-only).
+                    if payload.len() >= 4 && &payload[..4] == b"ODCM" {
+                        self.on_camera_frame(&payload, out);
+                    } else if payload.len() >= 4 && &payload[..4] == b"ODMI" {
+                        self.on_mic_frame(&payload, out);
+                    } else {
+                        self.on_control(now, &payload, out);
+                    }
+                }
                 Ok(None) => break,
                 Err(e) => {
                     self.connected = false;
@@ -273,6 +305,57 @@ impl SenderSession {
                 }
             }
         }
+    }
+
+    /// Parse the 32-byte `ODCM` header (big-endian, see PROTOCOL.md local
+    /// extension) and hand the Annex B access unit to the application.
+    fn on_camera_frame(&mut self, payload: &[u8], out: &mut Vec<SenderAction>) {
+        if payload.len() < 32 {
+            self.counters.control_ignored += 1;
+            return;
+        }
+        let version = payload[4];
+        let codec = payload[5];
+        let flags = payload[6];
+        let sequence = u32::from_be_bytes([payload[12], payload[13], payload[14], payload[15]]);
+        let chunk_index = u16::from_be_bytes([payload[16], payload[17]]);
+        let chunk_count = u16::from_be_bytes([payload[18], payload[19]]);
+        let payload_len =
+            u32::from_be_bytes([payload[20], payload[21], payload[22], payload[23]]) as usize;
+        let timestamp_ms = u64::from_be_bytes([
+            payload[24], payload[25], payload[26], payload[27], payload[28], payload[29],
+            payload[30], payload[31],
+        ]);
+        if version != 1
+            || codec != 1
+            || chunk_count != 1
+            || chunk_index != 0
+            || payload_len != payload.len() - 32
+        {
+            self.counters.control_ignored += 1;
+            self.warn_once("malformed ODCM camera frame".into(), out);
+            return;
+        }
+        out.push(SenderAction::CameraFrame {
+            keyframe: flags & 1 != 0,
+            sequence,
+            timestamp_ms,
+            data: payload[32..].to_vec(),
+        });
+    }
+
+    /// Parse an `ODMI` microphone block: 8-byte header (magic + version + 3
+    /// reserved) followed by signed 16-bit little-endian mono PCM at 48 kHz.
+    fn on_mic_frame(&mut self, payload: &[u8], out: &mut Vec<SenderAction>) {
+        if payload.len() <= 8 || payload[4] != 1 || (payload.len() - 8) % 2 != 0 {
+            self.counters.control_ignored += 1;
+            return;
+        }
+        let pcm: Vec<i16> = payload[8..]
+            .chunks_exact(2)
+            .map(|p| i16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        out.push(SenderAction::MicFrame(pcm));
     }
 
     fn on_control(&mut self, now: Now, payload: &[u8], out: &mut Vec<SenderAction>) {
@@ -337,10 +420,16 @@ impl SenderSession {
                 }
             }
             ControlMessage::Touch(t) => out.push(SenderAction::Touch(t)),
+            ControlMessage::Touches(t) => out.push(SenderAction::Touches(t)),
             ControlMessage::Scroll(s) => out.push(SenderAction::Scroll(s)),
             ControlMessage::Pencil(p) => out.push(SenderAction::Pencil(p)),
             ControlMessage::Proximity(p) => out.push(SenderAction::Proximity(p)),
+            ControlMessage::Key(k) => out.push(SenderAction::Key(k)),
+            ControlMessage::Pointer(p) => out.push(SenderAction::Pointer(p)),
+            ControlMessage::PointerScroll(s) => out.push(SenderAction::PointerScroll(s)),
+            ControlMessage::InputReset => out.push(SenderAction::InputReset),
             ControlMessage::Stats(v) => out.push(SenderAction::Stats(v)),
+            ControlMessage::CameraState(s) => out.push(SenderAction::CameraState(s)),
             ControlMessage::Sleeping => out.push(SenderAction::ReceiverSleeping),
             ControlMessage::Closing => out.push(SenderAction::ReceiverClosing),
             ControlMessage::CursorAck => self.udp_acked = true,

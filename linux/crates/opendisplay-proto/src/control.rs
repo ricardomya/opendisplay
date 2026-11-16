@@ -36,6 +36,10 @@ fn number_to_u64(n: &serde_json::Number, what: &str) -> Result<u64, String> {
     Err(format!("{n} is not a {what}"))
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn lenient_u32<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     let n = serde_json::Number::deserialize(d)?;
     let v = number_to_u64(&n, "u32").map_err(serde::de::Error::custom)?;
@@ -108,6 +112,18 @@ pub struct Hello {
     pub display_max_frame_rate: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_caps: Option<Vec<VideoCap>>,
+    /// Local extension: the receiver can play the pv 4 audio frames the
+    /// sender may interleave (`ODAU` magic + 48 kHz s16le stereo PCM).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub audio: bool,
+    /// Local extension: the receiver can capture its camera and send `ODCM`
+    /// H.264 frames on this session.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub camera: bool,
+    /// Local extension: the receiver can send its microphone as `ODMI`
+    /// 48 kHz mono s16 PCM frames on this session.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mic: bool,
     /// Panel facts (§6.7). Never fails the `hello`: a malformed object comes
     /// back as a [`Panel`] whose [`Panel::facts`] is `None`.
     #[serde(
@@ -335,10 +351,76 @@ pub struct Touch {
     pub t: Option<f64>,
 }
 
+/// One finger in a multi-touch snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TouchContact {
+    pub id: u32,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// `touches`: a full snapshot of the fingers currently on the glass. Sent only
+/// in tablet touch mode. The sender diffs snapshots: new ids go down, moved
+/// ids update, missing ids lift (with a cancel when `cancelled` is set).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Touches {
+    pub contacts: Vec<TouchContact>,
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
 /// `scroll` (§6.1): deltas in video pixels, natural-scrolling sign.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scroll {
     pub dx: f64,
+    pub dy: f64,
+}
+
+// --- pv 4 local extension: hardware keyboard / trackpad (upstream PR #316) --
+
+/// `key` (pv 4): physical key from the receiver's hardware keyboard. `code` is
+/// a HID Keyboard/Keypad usage; the sender's OS owns layout, IME and repeat.
+/// `mods` is the UIKit modifier mask and is informational.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Key {
+    #[serde(default, deserialize_with = "lenient_u32")]
+    pub code: u32,
+    #[serde(default)]
+    pub down: bool,
+    #[serde(rename = "mod", default, deserialize_with = "lenient_u32")]
+    pub mods: u32,
+}
+
+/// `pointer` (pv 4): absolute pointer from a trackpad's `.indirectPointer`
+/// touches. `phase` is began / moved / ended / cancelled; `button` names the
+/// button for the gesture (1 primary, 2 secondary, 3 middle) and `phase`
+/// alone says whether it is pressed. Kept as a string so an unknown phase is
+/// ignored instead of failing the whole message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Pointer {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_u32")]
+    pub button: u32,
+    #[serde(default, deserialize_with = "lenient_u32")]
+    pub clicks: u32,
+    #[serde(rename = "mod", default, deserialize_with = "lenient_u32")]
+    pub mods: u32,
+}
+
+/// `pointerScroll` (pv 4): trackpad scroll in the same video-pixel units as
+/// the legacy `scroll` message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PointerScroll {
+    #[serde(default)]
+    pub dx: f64,
+    #[serde(default)]
     pub dy: f64,
 }
 
@@ -442,6 +524,60 @@ pub struct StreamConfig {
     pub frames_per_second: u32,
 }
 
+/// Sender -> receiver (local extension): turn the receiver's camera on/off and
+/// choose the stream shape. The receiver answers with `cameraState` and then
+/// `ODCM` frames.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraConfig {
+    pub enable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<u32>,
+    /// "front" or "back".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<bool>,
+}
+
+/// Sender -> receiver (local extension): start or stop the microphone stream
+/// (`ODMI` frames).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MicConfig {
+    pub enable: bool,
+}
+
+/// Sender -> receiver (local extension): finger touches should reach Windows
+/// immediately (tablet touch mode) instead of waiting for the mouse tap/drag
+/// decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TouchConfig {
+    pub enable: bool,
+}
+
+/// Receiver -> sender (local extension): the camera's actual state, so the PC
+/// can explain why no frames arrive (disabled, denied, no device).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraState {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<String>,
+}
+
 /// Every control message of `pv` 3, plus [`ControlMessage::Unknown`] for
 /// types this implementation predates (§6: ignore, log at most once per type).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -454,12 +590,23 @@ pub enum ControlMessage {
     Ping(Ping),
     #[serde(rename = "touch")]
     Touch(Touch),
+    /// Receiver -> sender (local extension): full multi-touch snapshot.
+    #[serde(rename = "touches")]
+    Touches(Touches),
     #[serde(rename = "scroll")]
     Scroll(Scroll),
     #[serde(rename = "pencil")]
     Pencil(Pencil),
     #[serde(rename = "proximity")]
     Proximity(Proximity),
+    #[serde(rename = "key")]
+    Key(Key),
+    #[serde(rename = "pointer")]
+    Pointer(Pointer),
+    #[serde(rename = "pointerScroll")]
+    PointerScroll(PointerScroll),
+    #[serde(rename = "inputReset")]
+    InputReset,
     #[serde(rename = "kf")]
     Kf,
     #[serde(rename = "stats")]
@@ -483,6 +630,21 @@ pub enum ControlMessage {
     UpdateRequired(UpdateRequired),
     #[serde(rename = "streamConfig")]
     StreamConfig(StreamConfig),
+    // Local camera extension (both directions).
+    #[serde(rename = "cameraConfig")]
+    CameraConfig(CameraConfig),
+    #[serde(rename = "cameraState")]
+    CameraState(CameraState),
+    /// Sender -> receiver: force the next camera frame to be an IDR.
+    #[serde(rename = "cameraKf")]
+    CameraKf,
+    /// Sender -> receiver (local extension): start/stop the microphone
+    /// stream (`ODMI`).
+    #[serde(rename = "micConfig")]
+    MicConfig(MicConfig),
+    /// Sender -> receiver (local extension): tablet touch mode.
+    #[serde(rename = "touchConfig")]
+    TouchConfig(TouchConfig),
     /// A `type` this implementation does not know. Never serialised.
     #[serde(skip)]
     Unknown { kind: String, raw: Value },
@@ -517,9 +679,14 @@ impl ControlMessage {
             ControlMessage::Hello(_) => "hello",
             ControlMessage::Ping(_) => "ping",
             ControlMessage::Touch(_) => "touch",
+            ControlMessage::Touches(_) => "touches",
             ControlMessage::Scroll(_) => "scroll",
             ControlMessage::Pencil(_) => "pencil",
             ControlMessage::Proximity(_) => "proximity",
+            ControlMessage::Key(_) => "key",
+            ControlMessage::Pointer(_) => "pointer",
+            ControlMessage::PointerScroll(_) => "pointerScroll",
+            ControlMessage::InputReset => "inputReset",
             ControlMessage::Kf => "kf",
             ControlMessage::Stats(_) => "stats",
             ControlMessage::Sleeping => "sleeping",
@@ -531,6 +698,11 @@ impl ControlMessage {
             ControlMessage::Welcome(_) => "welcome",
             ControlMessage::UpdateRequired(_) => "updateRequired",
             ControlMessage::StreamConfig(_) => "streamConfig",
+            ControlMessage::CameraConfig(_) => "cameraConfig",
+            ControlMessage::CameraState(_) => "cameraState",
+            ControlMessage::CameraKf => "cameraKf",
+            ControlMessage::MicConfig(_) => "micConfig",
+            ControlMessage::TouchConfig(_) => "touchConfig",
             ControlMessage::Unknown { kind, .. } => kind,
         }
     }
@@ -561,9 +733,14 @@ fn is_known_type(kind: &str) -> bool {
         "hello"
             | "ping"
             | "touch"
+            | "touches"
             | "scroll"
             | "pencil"
             | "proximity"
+            | "key"
+            | "pointer"
+            | "pointerScroll"
+            | "inputReset"
             | "kf"
             | "stats"
             | "sleeping"
@@ -575,12 +752,31 @@ fn is_known_type(kind: &str) -> bool {
             | "welcome"
             | "updateRequired"
             | "streamConfig"
+            | "cameraConfig"
+            | "cameraState"
+            | "cameraKf"
+            | "micConfig"
+            | "touchConfig"
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_multi_touch_snapshot() {
+        let m = ControlMessage::parse(
+            br#"{"type":"touches","contacts":[{"id":1,"x":0.1,"y":0.2},{"id":2,"x":0.3,"y":0.4}],"cancelled":false}"#,
+        )
+        .unwrap();
+        let ControlMessage::Touches(t) = m else {
+            panic!("not a touches message");
+        };
+        assert_eq!(t.contacts.len(), 2);
+        assert_eq!(t.contacts[0].id, 1);
+        assert!(!t.cancelled);
+    }
 
     #[test]
     fn parses_official_hello_shapes() {
