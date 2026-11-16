@@ -220,7 +220,8 @@ final class AudioHub {
         } catch {
             Log.info("mic: stop failed: \(error)")
             engine.stop()
-            voiceActive = false
+            // Leave voiceActive set: the next start will run the full
+            // voice-unit teardown instead of assuming playback mode is live.
         }
         onMicState?(false, "")
     }
@@ -286,16 +287,38 @@ final class AudioHub {
                 let input = engine.inputNode
                 input.removeTap(onBus: 0)
                 try? input.setVoiceProcessingEnabled(false)
+                // The voice-processing I/O unit tears down asynchronously.
+                // Switching straight to .playback can make kAUStartIO fail
+                // with CoreAudio's "what" (2003329396), so give it a moment
+                // and reset the session before starting again.
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+                Thread.sleep(forTimeInterval: 0.15)
             }
             try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
         }
         #endif
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            guard wasVoice && !voice else { throw error }
+            Log.info("audio: playback start failed (\(error)); resetting the session")
+            #if os(iOS)
+            try? AVAudioSession.sharedInstance().setActive(false,
+                                                          options: .notifyOthersOnDeactivation)
+            Thread.sleep(forTimeInterval: 0.2)
+            try AVAudioSession.sharedInstance().setActive(true)
+            #endif
+            try engine.start()
+        }
         voiceActive = voice
         player.play()
+        #if os(iOS)
+        Log.info("audio: engine running (\(voice ? "voice" : "playback"), output volume \(AVAudioSession.sharedInstance().outputVolume))")
+        #else
         Log.info("audio: engine running (\(voice ? "voice" : "playback"))")
+        #endif
     }
 
     private func handleConfigurationChange() {
