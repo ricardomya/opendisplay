@@ -478,6 +478,8 @@ final class StreamReceiver: ObservableObject {
             guard paused != self.renderingPaused else { return }
             self.renderingPaused = paused
             if paused {
+                // Backgrounding mid-touch must lift every Windows contact.
+                if self.touchMode { self.sendTouches([], cancelled: true) }
                 // iOS interrupts capture in the background anyway; stop it
                 // deliberately so the sender's cameraState reflects reality.
                 self.camera.stop()
@@ -981,6 +983,7 @@ final class StreamReceiver: ObservableObject {
         case "touchConfig":
             let enable = obj["enable"] as? Bool ?? false
             DispatchQueue.main.async { self.touchMode = enable }
+            if !enable { sendTouches([], cancelled: true) }
             Log.info("touch: tablet mode \(enable)")
         case WireMessage.power:
             let action = (obj["action"] as? String).flatMap(PowerAction.init(rawValue:))

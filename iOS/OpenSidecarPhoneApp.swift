@@ -1278,7 +1278,10 @@ struct VideoLayerView: UIViewRepresentable {
             touchIDs = touchIDs.filter { present.contains($0.key) }
 
             var contacts: [StreamReceiver.TouchContact] = []
-            for touch in all where isFinger(touch) {
+            // Direct fingers only: a trackpad/Magic Keyboard pointer is
+            // forwarded over the pv 4 pointer path and must not also become a
+            // phantom touch contact.
+            for touch in all where touch.type == .direct {
                 let key = ObjectIdentifier(touch)
                 switch touch.phase {
                 case .began, .moved, .stationary:
