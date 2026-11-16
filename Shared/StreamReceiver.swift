@@ -139,9 +139,11 @@ final class StreamReceiver: ObservableObject {
     /// What the sender last asked for; replayed after a reconnect.
     private var micRequested = false
     /// Tablet touch mode from the sender: finger touches become real Windows
-    /// touch events, so the video view must send the down immediately instead
-    /// of waiting for the mouse tap/drag decision. Main-thread only.
-    var touchMode = true
+    /// touch events, so the video view sends multi-touch snapshots and the
+    /// down immediately. Starts false: the macOS sender never sends
+    /// `touchConfig`, and must keep receiving the legacy single-touch path.
+    /// Main-thread only.
+    var touchMode = false
     private var buffer = Data()
     private var formatDesc: CMVideoFormatDescription?
     #if DEBUG
@@ -1172,6 +1174,24 @@ final class StreamReceiver: ObservableObject {
     func sendTouch(phase: String, x: Double, y: Double) {
         var msg: [String: Any] = ["type": "touch", "phase": phase, "x": x, "y": y]
         if let offset = clockOffsetMs { msg["t"] = nowMs + offset }
+        sendControl(msg)
+    }
+
+    /// One finger in a multi-touch snapshot (tablet touch mode).
+    struct TouchContact {
+        let id: UInt32
+        let x: Double
+        let y: Double
+    }
+
+    /// Full snapshot of the fingers on the glass. The PC diffs snapshots into
+    /// Windows touch contacts, so pinch/pan work natively.
+    func sendTouches(_ contacts: [TouchContact], cancelled: Bool) {
+        var msg: [String: Any] = [
+            "type": "touches",
+            "contacts": contacts.map { ["id": $0.id, "x": $0.x, "y": $0.y] },
+        ]
+        if cancelled { msg["cancelled"] = true }
         sendControl(msg)
     }
 

@@ -1187,8 +1187,18 @@ struct VideoLayerView: UIViewRepresentable {
         private var twoFingerActive = false
         private var lastPan = CGPoint.zero
         private var lastNorm: (x: Double, y: Double) = (0.5, 0.5)
+        /// Multi-touch (tablet mode) contact ids and the last logged count.
+        private var touchIDs: [ObjectIdentifier: UInt32] = [:]
+        private var nextTouchID: UInt32 = 1
+        private var lastContactCount = -1
 
         @objc func didTwoFingerPan(_ recognizer: UIPanGestureRecognizer) {
+            if receiver?.touchMode == true {
+                // Real touch handles panning/pinching natively; do not also
+                // send wheel events.
+                twoFingerActive = false
+                return
+            }
             guard let video = receiver?.videoSize, video != .zero else { return }
             switch recognizer.state {
             case .began:
@@ -1253,9 +1263,55 @@ struct VideoLayerView: UIViewRepresentable {
             holdTimer = nil
         }
 
+        /// Tablet touch mode: send the complete set of fingers on the glass.
+        /// The PC diffs snapshots into Windows touch contacts, so apps that
+        /// support touch get real pinch/pan/multi-finger gestures.
+        private func sendTouchSnapshot(cancelled: Bool, event: UIEvent?) {
+            // Never let a mouse-mode press timer commit a legacy single touch
+            // after the stream switched to snapshots.
+            holdTimer?.cancel()
+            holdTimer = nil
+            pendingDown = nil
+            downSent = false
+            let all = event?.allTouches ?? []
+            let present = Set(all.map { ObjectIdentifier($0) })
+            touchIDs = touchIDs.filter { present.contains($0.key) }
+
+            var contacts: [StreamReceiver.TouchContact] = []
+            for touch in all where isFinger(touch) {
+                let key = ObjectIdentifier(touch)
+                switch touch.phase {
+                case .began, .moved, .stationary:
+                    let id: UInt32
+                    if let existing = touchIDs[key] {
+                        id = existing
+                    } else {
+                        id = nextTouchID
+                        nextTouchID &+= 1
+                        touchIDs[key] = id
+                    }
+                    guard let n = normalized(touch.location(in: self)) else { continue }
+                    contacts.append(.init(id: id, x: n.x, y: n.y))
+                case .ended, .cancelled:
+                    touchIDs.removeValue(forKey: key)
+                @unknown default:
+                    touchIDs.removeValue(forKey: key)
+                }
+            }
+            if contacts.count != lastContactCount {
+                lastContactCount = contacts.count
+                Log.info("touch: \(contacts.count) contact(s)")
+            }
+            receiver?.sendTouches(contacts, cancelled: cancelled)
+        }
+
         private func send(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?) {
             let fingers = touches.filter { isFinger($0) }
             guard !fingers.isEmpty else { return }
+            if receiver?.touchMode == true {
+                sendTouchSnapshot(cancelled: phase == "cancelled", event: event)
+                return
+            }
             // Ignore single-finger events while a two-finger gesture runs,
             // and end the click if a second finger joins mid-press.
             if twoFingerActive || (event?.allTouches?.filter { isFinger($0) }.count ?? 1) > 1 {
