@@ -1271,6 +1271,16 @@ struct VideoLayerView: UIViewRepresentable {
 
             switch phase {
             case "began":
+                if receiver?.touchMode == true {
+                    // Tablet touch mode: the PC injects a real touch, so the
+                    // down must arrive now — no mouse tap/drag arbitration.
+                    pendingDown = nil
+                    downSent = true
+                    holdTimer?.cancel()
+                    holdTimer = nil
+                    receiver?.sendTouch(phase: "began", x: norm.x, y: norm.y)
+                    return
+                }
                 let location = touch.location(in: self)
                 pendingDown = norm
                 pendingDownPoint = location

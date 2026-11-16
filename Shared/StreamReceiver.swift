@@ -138,6 +138,10 @@ final class StreamReceiver: ObservableObject {
     private var allowMic = true
     /// What the sender last asked for; replayed after a reconnect.
     private var micRequested = false
+    /// Tablet touch mode from the sender: finger touches become real Windows
+    /// touch events, so the video view must send the down immediately instead
+    /// of waiting for the mouse tap/drag decision. Main-thread only.
+    var touchMode = true
     private var buffer = Data()
     private var formatDesc: CMVideoFormatDescription?
     #if DEBUG
@@ -972,6 +976,10 @@ final class StreamReceiver: ObservableObject {
             }
             guard allowMic else { return }
             audio.setMicEnabled(true)
+        case "touchConfig":
+            let enable = obj["enable"] as? Bool ?? false
+            DispatchQueue.main.async { self.touchMode = enable }
+            Log.info("touch: tablet mode \(enable)")
         case WireMessage.power:
             let action = (obj["action"] as? String).flatMap(PowerAction.init(rawValue:))
             guard let action, powerActions.contains(action),
