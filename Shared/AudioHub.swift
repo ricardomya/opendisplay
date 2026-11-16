@@ -54,7 +54,7 @@ final class AudioHub {
                                            object: nil,
                                            queue: nil) { [weak self] note in
             guard let self, (note.object as? AVAudioEngine) === self.engine else { return }
-            self.queue.async { self?.handleConfigurationChange() }
+            self.queue.async { self.handleConfigurationChange() }
         })
         observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification,
                                            object: nil,
